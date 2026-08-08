@@ -1,0 +1,103 @@
+name: Android APK Otomatik Derleme
+
+# Ne zaman çalışır: main dalına her push'ta VEYA Actions sekmesinden elle tetiklendiğinde
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1) Kodları çek
+        uses: actions/checkout@v4
+
+      - name: 2) Node.js kur
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 3) .env dosyasını GitHub Secrets'tan oluştur
+        run: |
+          cat > .env << EOF
+          VITE_FIREBASE_API_KEY=${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN=${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID=${{ secrets.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_STORAGE_BUCKET=${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID=${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID=${{ secrets.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_MEASUREMENT_ID=${{ secrets.VITE_FIREBASE_MEASUREMENT_ID }}
+          EOF
+
+      - name: 4) Bağımlılıkları yükle
+        run: npm install
+
+      - name: 5) Web uygulamasını derle (Vite)
+        run: npm run build
+
+      - name: 6) Android platformunu ekle (ilk seferde yoksa oluşturur)
+        run: |
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
+
+      - name: 6.5) Galeriye kaydetme izinlerini AndroidManifest.xml'e ekle
+        run: |
+          node << 'EOF'
+          const fs = require('fs');
+          const path = 'android/app/src/main/AndroidManifest.xml';
+
+          if (!fs.existsSync(path)) {
+            console.log('Manifest bulunamadı, atlanıyor.');
+            process.exit(0);
+          }
+
+          let content = fs.readFileSync(path, 'utf8');
+
+          if (content.includes('READ_MEDIA_IMAGES')) {
+            console.log('İzinler zaten mevcut, atlanıyor.');
+            process.exit(0);
+          }
+
+          const permissions = [
+            '',
+            '    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />',
+            '    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" />',
+            '    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />',
+            '    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />'
+          ].join('\n');
+
+          const match = content.match(/<manifest\b[^>]*>/);
+          if (!match) {
+            console.log('<manifest> etiketi bulunamadı, atlanıyor.');
+            process.exit(0);
+          }
+
+          const insertAt = match.index + match[0].length;
+          content = content.slice(0, insertAt) + permissions + content.slice(insertAt);
+          fs.writeFileSync(path, content);
+          console.log('İzinler eklendi.');
+          EOF
+          grep "uses-permission" android/app/src/main/AndroidManifest.xml || true
+
+      - name: 7) Capacitor'ı senkronize et
+        run: npx cap sync android
+
+      - name: 8) JDK 17 kur (Gradle için gerekli)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: 9) APK'yı derle (debug - test için imzasız/otomatik imzalı)
+        working-directory: android
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug
+
+      - name: 10) APK'yı GitHub Actions'a yükle (indirilebilir çıktı)
+        uses: actions/upload-artifact@v4
+        with:
+          name: anka-art-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
